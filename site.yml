@@ -1,0 +1,19 @@
+- hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    pip_install_packages:
+      - name: boto
+  roles:
+    - { role: geerlingguy.pip, become: yes }
+    - aws
+
+
+- hosts: monitoring_servers
+  vars:
+    pip_install_packages:
+      - name: docker-py
+  roles:
+    - { role: geerlingguy.pip, become: yes }
+    - { role: geerlingguy.docker, become: yes }
+    # - { role: cedille-prometheus,  }

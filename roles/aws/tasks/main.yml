@@ -1,0 +1,288 @@
+---
+# tasks file for aws
+- setup:
+- debug:
+    msg: "{{ ansible_distribution }}"
+
+- pacman:
+    name: python-boto
+    state: present
+  becomes: yes
+  when: ansible_distribution  == "Arch Linux"
+  become: yes
+
+
+
+
+# First task : creating the VPC.
+# We are using the variables set in the vars.yml file.
+# The module gives us back its result,
+# which contains information about our new VPC.
+# We register it in the variable my_vpc.
+
+- ec2_vpc_net:
+    name: Module_dev2
+    cidr_block: 10.10.0.0/16
+    region: "{{ aws_region }}"
+    state: present
+    ## ~/boto is actually used to store aws credentials
+    # aws_access_key:   "{{ aws_access_key }}"
+    # aws_secret_key:   "{{ aws_secret_key }}"
+    # tags:
+    #   module: ec2_vpc_net
+    #   this: works
+    tenancy: default
+    # subnets:
+    #   - cidr: 10.10.1.0/16
+    #     resource_tags: {"Name":"Test Subnet"}
+  register: my_vpc
+
+
+
+# We now use the set_fact module
+# to save the id of the VPC in a new variable.
+
+- name:               Set VPC ID in variable
+  set_fact:
+    vpc_id:           "{{ my_vpc.vpc.id }}"
+
+
+
+
+# Creating our only Subnet in the VPC.
+# A subnet needs to be located in an Availability Zone (or AZ).
+# Again, we register the results in a variable for later.
+
+- name:               Create Public Subnet
+  ec2_vpc_subnet:
+    state:            "present"
+    vpc_id:           "{{ vpc_id }}"
+    cidr:             "{{ public_subnet_1_cidr }}"
+    az:               "{{ aws_region }}a"
+    region:           "{{ aws_region }}"
+    # aws_access_key:   "{{ aws_access_key }}"
+    # aws_secret_key:   "{{ aws_secret_key }}"
+    resource_tags:
+      Name:           "Public Subnet"
+  register: my_public_subnet
+
+
+# We save the id of the Public Subnet in a new variable.
+
+- name:               Set Public Subnet ID in variable
+  set_fact:
+    public_subnet_id: "{{ my_public_subnet.subnet.id }}"
+
+
+
+# Every VPC needs at least one Internet Gateway.
+# This component allows traffic between the VPC and the outside world.
+
+- name:               Create Internet Gateway for VPC
+  ec2_vpc_igw:
+    vpc_id:           "{{ vpc_id }}"
+    region:           "{{ aws_region }}"
+    # aws_access_key:   "{{ aws_access_key }}"
+    # aws_secret_key:   "{{ aws_secret_key }}"
+    state:            "present"
+  register: my_vpc_igw
+
+# We save the id of the Internet Gateway in a new variable.
+
+- name:               Set Internet Gateway ID in variable
+  set_fact:
+    igw_id:           "{{ my_vpc_igw.gateway_id }}"
+
+
+
+# Finally, we create our Main Security Group.
+# Basically the idea here is to allow SSH access
+# from your IP to the EC2 resources you will
+# start in your VPC.
+
+- name:               Create Main Security Group
+  ec2_group:
+    name:             "{{securityGroup_main}}"
+    description:      "{{securityGroup_main}}"
+    vpc_id:           "{{ vpc_id }}"
+    region:           "{{ aws_region }}"
+    # aws_access_key:   "{{ aws_access_key }}"
+    # aws_secret_key:   "{{ aws_secret_key }}"
+    rules:
+      - proto:        "tcp"
+        from_port:    "22"
+        to_port:      "22"
+        cidr_ip:      "{{ my_ip }}/32"
+      - proto:        "tcp"
+        from_port:    "8080"
+        to_port:      "8080"
+        cidr_ip:      "{{ my_ip }}/32"
+
+
+
+######### Usefull for privates network..####
+- name: allocate a new elastic IP without associating it to anything
+  ec2_eip:
+    state: present
+    region: "{{ aws_region }}"
+  register: my_eip
+
+# - name: output the IP
+#   debug:
+#     msg: "Allocated IP is {{ eip.public_ip }}"
+
+
+# - name: Create new nat gateway, using an EIP address  and wait for available status.
+#   ec2_vpc_nat_gateway:
+#     state: present
+#     subnet_id: subnet-12345678
+#     eip_address: "{{ eip.public_ip }}"
+#     wait: yes
+#     region: "{{aws_region}}"
+#   register: my_nat_gateway
+
+
+# - name: Set Nat Gateway ID in variable
+#   set_fact:
+#     nat_gateway_id: "{{ my_nat_gateway.stdout }}"
+
+###########################################
+
+
+- name: Create new nat gateway, using an EIP address  and wait for available status.
+  ec2_vpc_nat_gateway:
+    state: present
+    subnet_id: "{{ my_public_subnet.subnet.id }}"
+    eip_address: "{{ my_eip.public_ip }}"
+    wait: yes
+    region: "{{ aws_region }}"
+    if_exist_do_not_create: true
+  register: new_nat_gateway
+
+
+- debug:
+    msg: "My nat gateway: {{new_nat_gateway}}"
+
+# Now we set up a Route Table.
+# We attach that Route Table to the Public Subnet.
+# The route we create here defines the default routing
+# of the table, redirecting requests to the Internet Gateway.
+# We don't see it here, but the route table will also contain
+# a route for resources inside the VPC, so that if we need
+# to reach an internal resource, we don't go to the Internet
+# Gateway.
+
+# - name: Set up public subnet route table
+#   ec2_vpc_route_table:
+#     vpc_id: "{{ vpc_id }}"
+#     region: "{{ aws_region }}"
+#     # aws_access_key: "{{ aws_access_key }}"
+#     # aws_secret_key: "{{ aws_secret_key }}"
+#     tags:
+#       Name: "Public"
+#     subnets:
+#       - "{{ public_subnet_id }}"
+#     routes:
+#       - dest: "0.0.0.0/0"
+#         instance_id: "{{ nat.instance_id }}"
+#         gateway_id: "{{ igw_id }}"
+
+
+- name: Set up NAT-protected route table
+  ec2_vpc_route_table:
+    vpc_id: "{{ vpc_id }}"
+    region: "{{ aws_region }}"
+    tags:
+      Name: Internal
+    subnets:
+      - "{{ public_subnet_id }}"
+      # - 'Database Subnet'
+      # - '10.0.0.0/8'
+    routes:
+      - dest: 0.0.0.0/0
+        gateway_id: "{{ new_nat_gateway.nat_gateway_id }}"
+  register: nat_route_table
+
+
+
+
+# Creates a new ec2 key pair named `example` if not present using provided key
+# material.  This could use the 'file' lookup plugin to pull this off disk.
+- name: Configure admin key for ssh
+  ec2_key:
+    name: '{{ssh_admin_key.name}}'
+    key_material:  '{{ssh_admin_key.key}}'
+    region: '{{aws_region}}'
+    state: present
+
+- ec2_eni:
+    region: "{{ aws_region }}"
+    subnet_id: "{{ my_public_subnet.subnet.id }}"
+    state: present
+  register: my_eni
+
+
+- debug:
+    msg: "Here is my ENI : {{my_eni}}"
+
+
+
+# Advanced EC2
+# URL : https://wiki.debian.org/Cloud/AmazonEC2Image/Stretch
+- ec2:
+    # module: ec2
+    key_name: '{{ssh_admin_key.name }}'
+    region: '{{aws_region}}'
+    group: '{{securityGroup_main}}'
+    vpc_subnet_id: '{{public_subnet_id}}'
+    tenancy: "default"
+    instance_type:  t2.nano
+    image: ami-3709b053
+    wait: yes
+    wait_timeout: 500
+    instance_tags:
+       monitoring: prometheus-server
+    exact_count: 1
+    count_tag:
+      monitoring: prometheus-server
+    network_interfaces: "{{my_eni.id}}"
+    # assign_public_ip: yes
+
+
+# - ec2:
+#     region: '{{aws_region}}'
+#     instance_tags:
+#       monitoring: prometheus-server
+#     state: present
+#   register: my_vpc
+
+
+- ec2_remote_facts:
+    region: '{{aws_region}}'
+    filters:
+      instance-state-name: running
+      "tag:monitoring": prometheus-server
+  register: my_vpc
+
+
+
+- name: Wait for SSH to come up
+  wait_for:
+    host: "{{new_nat_gateway.private_ip_addresses.0.public_dns_name}}"
+    port: 22
+    delay: 60
+    timeout: 320
+    state: started
+
+
+- debug:
+    msg: "Here is my VPC : {{my_vpc.instances.0.public_dns_name}}"
+
+
+- add_host:
+    hostname: "{{ my_vpc.instances.0.public_dns_name }}"
+    host: "{{ my_vpc.instances.0.public_dns_name }}"
+    groups: "monitoring_servers"
+    ansible_ssh_host: "{{ my_vpc.instances.0.public_dns_name }}"
+    # ansible_ssh_port: "{{ new_port }}"
+    ansible_user: admin
